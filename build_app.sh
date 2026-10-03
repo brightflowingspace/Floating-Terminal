@@ -33,9 +33,11 @@ cat > "$APP/Contents/Info.plist" << 'PLIST'
   <key>CFBundleVersion</key>
   <string>1.0</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0</string>
+  <string>1.0.0</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>ターミナルの設定画面を開くために使います。</string>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
   <key>NSHighResolutionCapable</key>
