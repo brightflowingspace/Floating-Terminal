@@ -13,7 +13,8 @@ private let tabbingID = "FloatingTerminalTabs"
 // MARK: - ターミナル.app のプロファイル
 
 // ターミナル.app の既定プロファイル（設定 > プロファイル で「デフォルト」にしたもの）から読んだ設定。
-// 起動時に1回だけ読み、全タブで共有する。読めない項目は nil のままにして SwiftTerm の既定を使う。
+// 起動時と、Floating Terminal が前面に戻ってきたときに読み、全タブで共有する。
+// 読めない項目は nil のままにして SwiftTerm の既定を使う。
 struct TerminalProfile {
     var font: NSFont?
     var foreground: NSColor?
@@ -26,13 +27,18 @@ struct TerminalProfile {
     var cursorStyle: CursorStyle = .steadyBlock
     var bellStyle: BellStyle = .sound
     var palette: [SwiftTerm.Color]?
+    // 読み込んだ元のプロファイル（名前と中身）。前回から変わったかどうかの比較に使う
+    var source: NSDictionary?
 
     static func loadDefault() -> TerminalProfile {
         var result = TerminalProfile()
+        // 他のアプリ（ターミナル.app）が書き換えた最新の設定を読むために同期する
+        CFPreferencesAppSynchronize("com.apple.Terminal" as CFString)
         let defaults = UserDefaults(suiteName: "com.apple.Terminal")
         guard let name = defaults?.string(forKey: "Default Window Settings"),
               let profiles = defaults?.dictionary(forKey: "Window Settings"),
               let profile = profiles[name] as? [String: Any] else { return result }
+        result.source = [name: profile] as NSDictionary
 
         func color(_ key: String) -> NSColor? {
             guard let data = profile[key] as? Data,
@@ -102,7 +108,7 @@ final class TerminalSession: NSObject, LocalProcessTerminalViewDelegate, NSWindo
     let terminalView: LocalProcessTerminalView
     private let statusBar: NSView
     private let statusLabel: NSTextField
-    private let profile: TerminalProfile
+    private var profile: TerminalProfile
     var onClose: ((TerminalSession) -> Void)?
 
     init(profile: TerminalProfile) {
@@ -146,6 +152,12 @@ final class TerminalSession: NSObject, LocalProcessTerminalViewDelegate, NSWindo
 
         window.delegate = self
         terminalView.processDelegate = self
+        applyProfile()
+    }
+
+    // ターミナル.app の設定が変わったときに、開いているタブへ反映し直す
+    func update(profile newProfile: TerminalProfile) {
+        profile = newProfile
         applyProfile()
     }
 
@@ -336,6 +348,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    // Floating Terminal が前面に戻ってきたら、ターミナル.app の設定を読み直す。
+    // 変わっていたら、開いているすべてのタブに反映する（色・フォント・透過など）
+    func applicationDidBecomeActive(_ notification: Notification) {
+        let latest = TerminalProfile.loadDefault()
+        guard latest.source != profile.source else { return }
+        profile = latest
+        for session in sessions {
+            session.update(profile: latest)
+            applySettings(to: session)
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
@@ -477,8 +501,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // 設定は ターミナル.app の設定画面を使う（Floating Terminal はそこから配色などを読み込むため）。
     // ターミナル.app には設定画面を開く命令がないので、前面に出してから ⌘, を送る。
-    // キー送信には「アクセシビリティ」の許可が必要で、許可がなければターミナル.app が前面に出るだけになる
+    // キー送信には「アクセシビリティ」の許可が必要なので、許可がなければ システム設定 のその画面を開く
     @objc private func openTerminalSettings(_ sender: Any?) {
+        guard AXIsProcessTrusted() else {
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                NSWorkspace.shared.open(url)
+            }
+            return
+        }
         let source = """
         tell application "Terminal" to activate
         delay 0.3
