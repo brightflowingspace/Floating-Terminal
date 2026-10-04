@@ -103,6 +103,159 @@ struct TerminalProfile {
 
 // MARK: - タブ1つ分（ウインドウ＋シェル）
 
+// ファイルやURLをドラッグ＆ドロップすると、その場所(パス)やURLを入力する。ターミナル.app と同じ動き。
+// ファイルはシェル用にエスケープしたパスを、複数ならスペース区切りで、最後にスペースを1つ付けて入力する。
+// スクショ（撮影直後に左下に出るサムネイルのドラッグ、クリップボードの画像の ⌘V）は
+// 一時フォルダに PNG として保存し、そのパスを入力する。Claude Code はパスを画像として読み込む。
+final class DropTerminalView: LocalProcessTerminalView {
+    // スクショなどの画像を置く場所。再起動で macOS が片付ける一時フォルダの中に作る
+    private static let imageDirectory: URL = {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("FloatingTerminal", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    private static let imageTypes: [NSPasteboard.PasteboardType] = [.png, .tiff]
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        registerDropTypes()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        registerDropTypes()
+    }
+
+    private func registerDropTypes() {
+        registerForDraggedTypes([.fileURL, .URL, .string] + Self.imageTypes
+                                + NSFilePromiseReceiver.readableDraggedTypes.map { NSPasteboard.PasteboardType($0) })
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        let pasteboard = sender.draggingPasteboard
+        let canDrop = pasteboard.canReadObject(forClasses: [NSURL.self, NSFilePromiseReceiver.self], options: nil)
+            || pasteboard.availableType(from: [.string] + Self.imageTypes) != nil
+        return canDrop ? .copy : []
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let pasteboard = sender.draggingPasteboard
+        window?.makeKeyAndOrderFront(nil)
+        window?.makeFirstResponder(self)
+
+        // 実ファイルがあるときはそれを優先（Finder からのドラッグなど）
+        if let text = fileText(from: pasteboard) ?? imageText(from: pasteboard) {
+            paste(text: text)
+            return true
+        }
+        // スクショのサムネイルは「ファイルの約束」だけを渡してくるので、受け取ってから書き出してもらう
+        if let receivers = pasteboard.readObjects(forClasses: [NSFilePromiseReceiver.self], options: nil)
+            as? [NSFilePromiseReceiver], !receivers.isEmpty {
+            receivePromises(receivers)
+            return true
+        }
+        if let text = urlText(from: pasteboard) ?? pasteboard.string(forType: .string), !text.isEmpty {
+            paste(text: text)
+            return true
+        }
+        return false
+    }
+
+    // ⌘V。文字がなければ、コピーしたファイルのパスや、クリップボードの画像（スクショ）のパスを貼る
+    override func paste(_ sender: Any) {
+        let pasteboard = NSPasteboard.general
+        if pasteboard.string(forType: .string) == nil,
+           let text = fileText(from: pasteboard) ?? imageText(from: pasteboard) {
+            paste(text: text)
+            return
+        }
+        super.paste(sender)
+    }
+
+    // シェルや Claude Code が「貼り付け」と分かるよう、対応していれば括弧付きペーストで送る
+    private func paste(text: String) {
+        if getTerminal().bracketedPasteMode {
+            send(txt: "\u{1b}[200~" + text + "\u{1b}[201~")
+        } else {
+            send(txt: text)
+        }
+    }
+
+    private func pathsText(_ urls: [URL]) -> String {
+        urls.map { Self.shellEscaped($0.path) }.joined(separator: " ") + " "
+    }
+
+    private func fileText(from pasteboard: NSPasteboard) -> String? {
+        let fileOnly: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        guard let files = pasteboard.readObjects(forClasses: [NSURL.self], options: fileOnly) as? [URL],
+              !files.isEmpty else { return nil }
+        return pathsText(files)
+    }
+
+    private func urlText(from pasteboard: NSPasteboard) -> String? {
+        guard let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
+              !urls.isEmpty else { return nil }
+        return urls.map(\.absoluteString).joined(separator: " ")
+    }
+
+    // 画像そのものが入っているとき（⌃⇧⌘4 でクリップボードに撮ったスクショなど）は PNG に書き出す
+    private func imageText(from pasteboard: NSPasteboard) -> String? {
+        guard let type = pasteboard.availableType(from: Self.imageTypes),
+              let data = pasteboard.data(forType: type) else { return nil }
+        let png: Data?
+        if type == .png {
+            png = data
+        } else {
+            png = NSBitmapImageRep(data: data)?.representation(using: .png, properties: [:])
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd_HH.mm.ss"
+        let url = Self.uniqueURL(in: Self.imageDirectory, name: "screenshot_\(formatter.string(from: Date())).png")
+        guard let png, (try? png.write(to: url)) != nil else { return nil }
+        return pathsText([url])
+    }
+
+    private func receivePromises(_ receivers: [NSFilePromiseReceiver]) {
+        // 受け取り先は毎回別のフォルダにして、同じ名前のファイルがぶつからないようにする
+        let dir = Self.imageDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let group = DispatchGroup()
+        var received: [URL] = []
+        let lock = NSLock()
+        for receiver in receivers {
+            group.enter()
+            receiver.receivePromisedFiles(atDestination: dir, options: [:], operationQueue: .main) { url, error in
+                if error == nil {
+                    lock.lock(); received.append(url); lock.unlock()
+                }
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) { [weak self] in
+            guard let self, !received.isEmpty else { return }
+            self.paste(text: self.pathsText(received))
+        }
+    }
+
+    private static func uniqueURL(in dir: URL, name: String) -> URL {
+        var url = dir.appendingPathComponent(name)
+        let base = url.deletingPathExtension().lastPathComponent
+        var n = 2
+        while FileManager.default.fileExists(atPath: url.path) {
+            url = dir.appendingPathComponent("\(base)_\(n).png")
+            n += 1
+        }
+        return url
+    }
+
+    // 空白や記号の前に \ を付ける(ターミナル.app のドロップと同じ形)
+    private static func shellEscaped(_ path: String) -> String {
+        let special = Set(" \\'\"`$&*?!|;<>()[]{}#~^%=,")
+        return path.map { special.contains($0) ? "\\\($0)" : String($0) }.joined()
+    }
+}
+
 final class TerminalSession: NSObject, LocalProcessTerminalViewDelegate, NSWindowDelegate {
     let window: NSWindow
     let terminalView: LocalProcessTerminalView
@@ -133,7 +286,7 @@ final class TerminalSession: NSObject, LocalProcessTerminalViewDelegate, NSWindo
         var termFrame = container.bounds
         termFrame.origin.y = barHeight
         termFrame.size.height -= barHeight
-        terminalView = LocalProcessTerminalView(frame: termFrame)
+        terminalView = DropTerminalView(frame: termFrame)
         terminalView.autoresizingMask = [.width, .height]
         container.addSubview(terminalView)
 
