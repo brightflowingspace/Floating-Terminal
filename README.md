@@ -128,6 +128,14 @@ swift make_icon.swift AppIcon.png
 - 署名は自分の Mac 用の簡易署名（ad-hoc）です。ビルドし直すと別のアプリとして扱われ、アクセシビリティの許可が外れることがあります。そのときは「設定メニューの仕様」の手順で許可し直してください。他の Mac で開くと、macOS の警告が出ることがあります。
 - 背景のぼかしは、macOS の非公開の機能を使っています。将来の macOS で効かなくなった場合も、ぼかしがなくなるだけでアプリは動きます。
 
+## 音声入力（Hammerspoon）
+
+右 Command キーを押している間だけ録音し、離すと whisper.cpp（ローカル）で文字起こしして、いま選んでいる入力欄に自動で入力します。押している間も約1秒ごとに、画面の下に途中の文字を表示します。Floating Terminal に限らず、どのアプリの入力欄でも使えます。
+
+- 設定ファイル … `voice-input/init.lua`（これを `~/.hammerspoon/init.lua` に置いて Hammerspoon を再読み込み）
+- 必要なもの … Hammerspoon、`brew install sox whisper-cpp`、モデル `~/.whisper-models/ggml-base.bin`
+- Hammerspoon にマイクとアクセシビリティの許可が必要です
+
 ## ファイル構成
 
 - `Sources/FloatingTerminal/main.swift` … アプリ本体
@@ -135,3 +143,4 @@ swift make_icon.swift AppIcon.png
 - `build_app.sh` … ビルドして .app を作るスクリプト
 - `make_icon.swift` … アイコンを描くスクリプト
 - `AppIcon.png` / `AppIcon.icns` … アイコン
+- `voice-input/init.lua` … 音声入力の設定（Hammerspoon）
